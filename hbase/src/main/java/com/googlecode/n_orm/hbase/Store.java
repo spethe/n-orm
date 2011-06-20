@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -34,10 +35,10 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
 import org.apache.hadoop.hbase.client.HTable;
-import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.client.RetriesExhaustedException;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
@@ -50,6 +51,7 @@ import org.apache.hadoop.hbase.io.hfile.Compression;
 import org.apache.hadoop.hbase.io.hfile.Compression.Algorithm;
 import org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.io.compress.Compressor;
 import org.apache.hadoop.mapreduce.Job;
 
 import com.googlecode.n_orm.DatabaseNotReachedException;
@@ -57,14 +59,11 @@ import com.googlecode.n_orm.EmptyCloseableIterator;
 import com.googlecode.n_orm.PropertyManagement;
 import com.googlecode.n_orm.hbase.RecursiveFileAction.Report;
 import com.googlecode.n_orm.hbase.actions.Action;
-import com.googlecode.n_orm.hbase.actions.BatchAction;
 import com.googlecode.n_orm.hbase.actions.DeleteAction;
 import com.googlecode.n_orm.hbase.actions.ExistsAction;
 import com.googlecode.n_orm.hbase.actions.GetAction;
-import com.googlecode.n_orm.hbase.actions.IncrementAction;
 import com.googlecode.n_orm.hbase.actions.ScanAction;
-import com.googlecode.n_orm.hbase.mapreduce.RowCounter;
-import com.googlecode.n_orm.hbase.mapreduce.Truncator;
+import com.googlecode.n_orm.hbase.actions.PutAction;
 import com.googlecode.n_orm.storeapi.Constraint;
 
 /**
@@ -198,7 +197,6 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 			Properties p = new Properties();
 			p.setProperty("commaSeparatedConfigurationFolders", commaSeparatedConfigurationFolders);
 			Store ret = knownStores.get(p);
-			
 			if (ret == null) {
 				logger.info("Creating store for " + commaSeparatedConfigurationFolders);
 				Configuration conf = new Configuration();
@@ -213,12 +211,11 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 					throw new IOException("Could not find hbase-site.xml from folders " + commaSeparatedConfigurationFolders);
 				
 				ret = new Store(p);
-				ret.setConf(HBaseConfiguration.create(conf));
+				ret.setConf(new HBaseConfiguration(conf));
 				
 				knownStores.put(p, ret);
 				logger.info("Created store " + ret.hashCode() + " for " + commaSeparatedConfigurationFolders);
 			}
-			
 			return ret;
 		}
 	}
@@ -229,7 +226,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 	
 	private final Properties launchProps;
 	private String host = "localhost";
-	private int port = HConstants.DEFAULT_ZOOKEPER_CLIENT_PORT;
+	private int port = 2181;
 	private Integer maxRetries = null;
 	private boolean wasStarted = false;
 	private Configuration config;
@@ -250,7 +247,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		logger.info("Starting store " + this.hashCode());
 
 		if (this.config == null) {
-			Configuration properties = HBaseConfiguration.create();
+			Configuration properties = new HBaseConfiguration();
 			properties.clear();
 
 			properties.set(HConstants.ZOOKEEPER_QUORUM, this.getHost());
@@ -267,7 +264,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		if (this.admin == null)
 			try {
 				logger.fine("Connecting HBase admin for store " + this.hashCode());
-				this.setAdmin(new HBaseAdmin(this.config));
+				this.setAdmin(new HBaseAdmin(new HBaseConfiguration(this.config)));
 				logger.fine("Connected HBase admin for store " + this.hashCode());
 				if (!this.admin.isMasterRunning()) {
 					errorLogger.severe("No HBase master running for store " + this.hashCode());
@@ -310,12 +307,47 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		return compression.getName();
 	}
 
+	  private final static Boolean[] compressionTestResults
+	      = new Boolean[Compression.Algorithm.values().length];
+	  public static boolean testCompression(String codec) {
+	    codec = codec.toLowerCase();
+
+	    Compression.Algorithm a;
+
+	    try {
+	      a = Compression.getCompressionAlgorithmByName(codec);
+	    } catch (IllegalArgumentException e) {
+	      return false;
+	    }
+	    return testCompression(a);
+	  }
+
+	  public static boolean testCompression(Compression.Algorithm algo) {
+	    if (compressionTestResults[algo.ordinal()] != null) {
+	      if (compressionTestResults[algo.ordinal()]) {
+	        return true;
+	      } else {
+	        return false;
+	      }
+	    }
+
+	    try {
+	      Compressor c = algo.getCompressor();
+	      algo.returnCompressor(c);
+	      compressionTestResults[algo.ordinal()] = true; // passes
+	      return true;
+	    } catch (Throwable t) {
+	      compressionTestResults[algo.ordinal()] = false; // failure
+	      return false;
+	    }
+	  }
+
 	public void setCompression(String compression) {
 		if (compression == null) {
 			this.compression = null;
 		} else {
 			for (String cmp : compression.split("-or-")) {
-				if (org.apache.hadoop.hbase.util.CompressionTest.testCompression(cmp)) {
+				if (testCompression(cmp)) {
 					this.compression = Compression.getCompressionAlgorithmByName(cmp);
 					break;
 				}
@@ -341,7 +373,11 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 
 	public void setAdmin(HBaseAdmin admin) {
 		this.admin = admin;
-		this.setConf(admin.getConfiguration());
+		try {
+			Field confProp = HBaseAdmin.class.getDeclaredField("conf");
+			confProp.setAccessible(true);
+			this.setConf((Configuration)confProp.get(admin));
+		} catch (Exception x) {}
 	}
 	
 	protected String mangleTableName(String table) {
@@ -389,7 +425,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 				this.tablesC.clear();
 			}
 		}
-		this.config = HBaseConfiguration.create(this.config);
+		this.config = new HBaseConfiguration(this.config);
 		this.admin = null;
 		this.wasStarted = false;
 		this.start();
@@ -516,7 +552,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 			if (ret == null) {
 				try {
 					logger.fine("Creating accessor for table " + name);
-					ret = new HTable(this.config, name);
+					ret = new HTable((HBaseConfiguration) this.config, name);
 					this.cache(name, ret);
 					logger.fine("Created accessor for table " + name);
 					return ret;
@@ -681,11 +717,9 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		HTable t = this.getTable(table, famAr);
 
 		byte[] row = Bytes.toBytes(id);
-		
-
-		List<org.apache.hadoop.hbase.client.Row> actions = new ArrayList<org.apache.hadoop.hbase.client.Row>(2);
 
 		Put rowPut = null;
+
 		if (changed != null && !changed.isEmpty()) {
 			rowPut = new Put(row);
 			for (String family : changed.keySet()) {
@@ -695,7 +729,6 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 					rowPut.add(cf, Bytes.toBytes(key), toPut.get(key));
 				}
 			}
-			actions.add(rowPut);
 		}
 
 		Delete rowDel = null;
@@ -708,35 +741,50 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 				}
 
 			}
-			actions.add(rowDel);
-		}
-		
-		Increment rowInc = null;
-		if (increments != null && !increments.isEmpty()) {
-			rowInc = new Increment(row);
-			for (Entry<String, Map<String, Number>> incrs : increments.entrySet()) {
-				for (Entry<String, Number> inc : incrs.getValue().entrySet()) {
-					rowInc.addColumn(Bytes.toBytes(incrs.getKey()), Bytes.toBytes(inc.getKey()), inc.getValue().longValue());
-				}
-			}
-			//Can't add that to actions :(
 		}
 
 		//An empty object is to be stored...
-		if (rowPut == null && rowInc == null) { //NOT rowDel == null; deleting an element that becomes empty actually deletes the element !
+		if (rowPut == null && (increments == null || increments.isEmpty())) { //NOT rowDel == null; deleting an element that becomes empty actually deletes the element !
 			rowPut = new Put(row);
 			rowPut.add(Bytes.toBytes(PropertyManagement.PROPERTY_COLUMNFAMILY_NAME), null, new byte[]{});
-			actions.add(rowPut);
 		}
 		
-		if (! actions.isEmpty()) {
-			BatchAction act = new BatchAction(actions);
+		if (rowPut != null) {
+			PutAction act = new PutAction(rowPut);
 			this.tryPerform(act, t, table, famAr);
 			t = act.getTable();
 		}
 		
-		if (rowInc != null) {
-			this.tryPerform(new IncrementAction(rowInc), t, table, famAr);
+		if (rowDel != null) {
+			DeleteAction act = new DeleteAction(rowDel);
+			this.tryPerform(act, t, table, famAr);
+			t = act.getTable();
+		}
+
+		if (increments != null) {
+			int maxTries = 3;
+			boolean done = false;
+			do {
+				maxTries--;
+				try {
+					for (String fam : increments.keySet()) {
+						Map<String, Number> incrs = increments.get(fam);
+						Iterator<Entry<String, Number>> incri = incrs.entrySet().iterator();
+						while (incri.hasNext()) {
+							Entry<String, Number> incr = incri.next();
+							t.incrementColumnValue(row, Bytes.toBytes(fam),
+									Bytes.toBytes(incr.getKey()), incr.getValue().longValue());
+							incri.remove();
+						}
+					}
+					done = true;
+				} catch (IOException e) {
+					if (maxTries > 0) {
+						t = this.handleProblemAndGetTable(e, table, famAr);
+					} else
+						throw new DatabaseNotReachedException(e);
+				}
+			} while (!done);
 		}
 	}
 
@@ -768,25 +816,6 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		} finally {
 			if (r != null)
 				r.close();
-		}
-	}
-	
-	protected long countMapRed(String table, Scan s) throws DatabaseNotReachedException {
-		if (!this.hasTableNoCache(table))
-			return 0;
-
-		String tableName = this.mangleTableName(table);
-		try {
-			Job count = RowCounter.createSubmittableJob(this, tableName, s);
-			if(!count.waitForCompletion(false))
-				throw new DatabaseNotReachedException("Row count failed for table " + table);
-			return count.getCounters().findCounter(RowCounter.RowCounterMapper.Counters.ROWS).getValue();
-		} catch (IOException e) {
-			throw new DatabaseNotReachedException(e);
-		} catch (InterruptedException e) {
-			throw new DatabaseNotReachedException(e);
-		} catch (ClassNotFoundException e) {
-			throw new DatabaseNotReachedException(e);
 		}
 	}
 
@@ -923,7 +952,7 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 
 		try {
 			final int nbRows = 100;
-			List<Delete> dels = new ArrayList<Delete>(nbRows);
+			ArrayList<Delete> dels = new ArrayList<Delete>(nbRows);
 			Result [] res = r.next(nbRows);
 			while (res != null && res.length != 0) {
 				dels.clear();
@@ -940,32 +969,6 @@ public class Store implements com.googlecode.n_orm.storeapi.GenericStore {
 		} finally {
 			if (r != null)
 				r.close();
-		}
-	}
-	
-	protected void truncateMapReduce(String table, Scan s)  {
-		if (!this.hasTableNoCache(table))
-			return;
-		
-		logger.info("Truncating table " + table + " using map/reduce job");
-
-		String tableName = this.mangleTableName(table);
-		try {
-			Job count = Truncator.createSubmittableJob(this, tableName, s);
-			if(!count.waitForCompletion(false)) {
-				errorLogger.info("Could not truncate table with map/reduce " + table);
-				throw new DatabaseNotReachedException("Truncate failed for table " + table);
-			}
-			logger.info("Truncated table " + table + " using map/reduce job");
-		} catch (IOException e) {
-			errorLogger.log(Level.INFO, "Could not truncate table " + table, e);
-			throw new DatabaseNotReachedException(e);
-		} catch (InterruptedException e) {
-			errorLogger.log(Level.INFO, "Could not truncate table " + table, e);
-			throw new DatabaseNotReachedException(e);
-		} catch (ClassNotFoundException e) {
-			errorLogger.log(Level.INFO, "Could not truncate table " + table, e);
-			throw new DatabaseNotReachedException(e);
 		}
 	}
 

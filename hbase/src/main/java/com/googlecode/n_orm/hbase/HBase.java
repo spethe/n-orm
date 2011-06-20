@@ -21,7 +21,7 @@ import java.util.Map;
  * However, if your application is ran within a servlet container (Tomcat, JBoss...), you should care excluding servlet and jsp APIs whom HBase depends on... 
  */
 public class HBase {
-
+	
 	private static Map<String, Store> knownStores = new HashMap<String, Store>();
 	
 	private static Class<?>[] parameters = new Class[] { URL.class };
@@ -64,7 +64,6 @@ public class HBase {
 	public static Store getStore(String commaSeparatedConfigurationFolders)
 			throws IOException {
 		synchronized(HBase.class) {
-		
 			Store ret = knownStores.get(commaSeparatedConfigurationFolders);
 			
 			if (ret == null) {
@@ -74,7 +73,6 @@ public class HBase {
 				ret = Store.getStore(commaSeparatedConfigurationFolders);
 				knownStores.put(commaSeparatedConfigurationFolders, ret);
 			}
-			
 			return ret;
 		}
 	}
