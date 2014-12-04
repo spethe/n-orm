@@ -5,13 +5,13 @@ import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -29,6 +29,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -38,14 +40,16 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.MasterNotRunningException;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.TableExistsException;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotEnabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
 import org.apache.hadoop.hbase.UnknownScannerException;
-import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.client.HConnection;
 import org.apache.hadoop.hbase.client.HConnectionManager;
 import org.apache.hadoop.hbase.client.HTableInterface;
 import org.apache.hadoop.hbase.client.HTablePool;
@@ -63,12 +67,13 @@ import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
 import org.apache.hadoop.hbase.filter.KeyOnlyFilter;
 import org.apache.hadoop.hbase.filter.QualifierFilter;
-import org.apache.hadoop.hbase.io.hfile.Compression;
-import org.apache.hadoop.hbase.io.hfile.Compression.Algorithm;
+import org.apache.hadoop.hbase.io.compress.Compression;
+import org.apache.hadoop.hbase.io.compress.Compression.Algorithm;
+import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
+import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.zookeeper.ZooKeeper;
 import org.codehaus.plexus.util.DirectoryScanner;
@@ -322,7 +327,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 	private Integer maxVersions = null;
 	private boolean forceMaxVersions = false;
 	
-	private StoreFile.BloomType bloomFilterType = null;
+	private BloomType bloomFilterType = null;
 	private boolean forceBloomFilterType = false;
 
 	private Boolean blockCacheEnabled = null;
@@ -411,7 +416,10 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 		RecoverableZooKeeper zk = null;
 		do {
 			try {
-				zk = this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper();
+				HConnection conn = this.admin.getConnection();
+				Method getZK = conn.getClass().getDeclaredMethod("getKeepAliveZooKeeperWatcher");
+				getZK.setAccessible(true);
+				zk = ((ZooKeeperWatcher) getZK.invoke(conn)).getRecoverableZooKeeper();
 			} catch (Exception x) {
 				try {
 					Thread.sleep(50);
@@ -424,7 +432,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 		}
 		
 		try {
-			String[] host = this.admin.getConnection().getZooKeeperWatcher().getQuorum().split(",")[0].split(":");
+			String[] host = new String [] {"???"};//this.admin.getConnection().getZooKeeperWatcher().getQuorum().split(",")[0].split(":");
 			this.host = host[0].trim();
 			if (host.length > 1)
 				this.port = Integer.parseInt(host[1].trim());
@@ -793,7 +801,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 	/**
 	 * Whether created tables should have {@link HColumnDescriptor#setBloomFilterType(org.apache.hadoop.hbase.regionserver.StoreFile.BloomType)} set. 
 	 */
-	public StoreFile.BloomType getBloomFilterType() {
+	public BloomType getBloomFilterType() {
 		return bloomFilterType;
 	}
 
@@ -802,7 +810,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 	 * Default value is equivalent to {@link HColumnDescriptor#DEFAULT_BLOOMFILTER}
 	 * null is considered as unset (i.e. the default value).
 	 */
-	public void setBloomFilterType(StoreFile.BloomType bloomFilterType) {
+	public void setBloomFilterType(BloomType bloomFilterType) {
 		PropertyUtils.clearCachedValues();
 		this.bloomFilterType = bloomFilterType;
 	}
@@ -1313,19 +1321,19 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 	ZooKeeper getZooKeeper() throws DatabaseNotReachedException {
 		ZooKeeper zk;
 		try {
+			HConnection conn = this.admin.getConnection();
+			Method getZK = conn.getClass().getDeclaredMethod("getKeepAliveZooKeeperWatcher");
+			getZK.setAccessible(true);
 			try {
-				zk = this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper().getZooKeeper();
-			} catch (ZooKeeperConnectionException x) { //Lost zookeeper ?
+				zk = ((ZooKeeperWatcher) getZK.invoke(conn)).getRecoverableZooKeeper().getZooKeeper();
+			} catch (Exception x) { //Lost zookeeper ?
 				this.restart();
-				zk = this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper().getZooKeeper();
-			} catch (NullPointerException x) { //Lost zookeeper ?
-				this.restart();
-				zk = this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper().getZooKeeper();
+				zk = ((ZooKeeperWatcher) getZK.invoke(conn)).getRecoverableZooKeeper().getZooKeeper();
 			}
 			if (!zk.getState().isAlive()) {
 				errorLogger.log(Level.WARNING, "Zookeeper connection lost ; restarting...");
 				this.restart();
-				zk = this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper().getZooKeeper();
+				zk = null;//this.admin.getConnection().getZooKeeperWatcher().getRecoverableZooKeeper().getZooKeeper();
 			}
 			return zk;
 		} catch (Exception e1) {
@@ -1457,7 +1465,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 					try {
 						if (!this.hasTableInt(name)) {
 							logger.info("Table " + name + " not found ; creating" + (expectedFamilies == null ? "" : " with column families " + expectedFamilies.keySet().toString()));
-							td = new HTableDescriptor(name.getNameAsBytes());
+							td = new HTableDescriptor(TableName.valueOf(name.getNameAsBytes()));
 							PropertyUtils.setValues(this, td, clazz, tablePostfix);
 							if (expectedFamilies != null) {
 								for (Entry<String, Field> fam : expectedFamilies.entrySet()) {
@@ -1839,15 +1847,15 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 			return null;
 		
 		ColumnFamilyData ret = new DefaultColumnFamilyData();
-		for (KeyValue kv : r.list()) {
-			String familyName = Bytes.toString(kv.getFamily());
+		for (Cell kv : r.listCells()) {
+			String familyName = Bytes.toString(CellUtil.cloneFamily(kv));
 			Map<String, byte[]> fam = ret.get(familyName);
 			if (fam == null) {
 				fam = new TreeMap<String, byte[]>();
 				ret.put(familyName, fam);
 			}
-			fam.put(Bytes.toString(kv.getQualifier()),
-					kv.getValue());
+			fam.put(Bytes.toString(CellUtil.cloneQualifier(kv)),
+					CellUtil.cloneValue(kv));
 		}
 		return ret;
 	}
@@ -1957,7 +1965,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 					}
 	
 				}
-				if (rowDel.getFamilyMap().isEmpty())
+				if (rowDel.getFamilyCellMap().isEmpty())
 					rowDel = null;
 				else
 					actions.add(rowDel);
@@ -1974,7 +1982,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 						rowInc.addColumn(cf, Bytes.toBytes(inc.getKey()), inc.getValue().longValue());
 					}
 				}
-				if (rowInc.getFamilyMap().isEmpty())
+				if (rowInc.getFamilyCellMap().isEmpty())
 					rowInc = null;
 				//Can't add that to actions :(
 			}
@@ -1992,7 +2000,7 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 				HBaseSchema.WALWritePolicy useWal = null;
 				HBaseSchema clazzAnnotation = meta == null || meta.getClazz() == null ? null : meta.getClazz().getAnnotation(HBaseSchema.class);
 				HBaseSchema.WALWritePolicy clazzWAL = clazzAnnotation == null ? HBaseSchema.WALWritePolicy.UNSET : clazzAnnotation.writeToWAL();
-				for(byte[] famB : rowPut.getFamilyMap().keySet()) {
+				for(byte[] famB : rowPut.getFamilyCellMap().keySet()) {
 					String famS = Bytes.toString(famB);
 					HBaseSchema.WALWritePolicy wtw;
 					if (PropertyManagement.PROPERTY_COLUMNFAMILY_NAME.equals(famS)) {
@@ -2030,10 +2038,13 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 				case UNSET:
 					break;
 				case SKIP:
-					rowPut.setWriteToWAL(false);
+					rowPut.setDurability(Durability.SKIP_WAL);
 					break;
-				default:
-					rowPut.setWriteToWAL(true);
+				case ASYNC:
+					rowPut.setDurability(Durability.ASYNC_WAL);
+					break;
+				case USE:
+					rowPut.setDurability(Durability.SYNC_WAL);
 					break;
 				}
 			}
@@ -2143,8 +2154,8 @@ public class Store implements com.googlecode.n_orm.storeapi.Store, ActionnableSt
 		
 		Map<String, byte[]> ret = new HashMap<String, byte[]>();
 		if (!r.isEmpty()) {
-			for (KeyValue kv : r.raw()) {
-				ret.put(Bytes.toString(kv.getQualifier()), kv.getValue());
+			for (Cell kv : r.rawCells()) {
+				ret.put(Bytes.toString(CellUtil.cloneQualifier(kv)), CellUtil.cloneValue(kv));
 			}
 		}
 		return ret;
