@@ -1,0 +1,10 @@
+
+syntax: regexp
+^target/.*$
+^.*/target/.*$
+^.metadata$
+^.DS_Store$
+^coverage$
+^.idea/*$
+^.*.iml$
+
